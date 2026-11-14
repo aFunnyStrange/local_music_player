@@ -1,6 +1,7 @@
 """Run Tk and asyncio on the main thread with bounded blocking I/O workers."""
 import asyncio
 import logging
+import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Coroutine, Optional
 import settings
 from .library import Track, load_state, path_key, save_state, scan_library, visible_tracks
 from .playback import MODES, Playback, VlcBackend
+from .tray import WindowsTray
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +38,11 @@ class Application:
         self.save_task: Optional[asyncio.Task] = None
         self.search_timer = None
         self.closing = False
+        self.tray: Optional[WindowsTray] = None
+        self.hidden_to_tray = False
+        self.close_dialog: Optional[tk.Toplevel] = None
+        self.tray_popup: Optional[tk.Toplevel] = None
+        self.hidden_children: list[tk.Toplevel] = []
         self.scan_errors: list[str] = []
         self.save_lock = asyncio.Lock()
         self.save_dirty = False
@@ -51,7 +58,14 @@ class Application:
         self.dragging = False
         playback.mode, playback.volume = state["mode"], int(state["volume"])
         self._build()
-        self.root.protocol("WM_DELETE_WINDOW", self.request_close)
+        self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
+        self.tray_menu = tk.Menu(root, tearoff=False)
+        self.tray_menu.add_command(label="打开播放器", command=self.restore_window)
+        self.tray_menu.add_command(label="播放 / 暂停", command=self.toggle_play)
+        self.tray_menu.add_command(label="上一首", command=lambda: self.launch(self.playback.skip(-1)))
+        self.tray_menu.add_command(label="下一首", command=lambda: self.launch(self.playback.skip(1)))
+        self.tray_menu.add_separator()
+        self.tray_menu.add_command(label="退出播放器", command=self.request_close)
 
     def _build(self) -> None:
         """Compose a searchable library, real scrollbars and stable playback controls."""
@@ -103,6 +117,7 @@ class Application:
         ttk.Button(actions, text="收藏 / 取消收藏", command=self.toggle_favorite).pack(side="left")
         ttk.Button(actions, text="修改显示名称", command=self.rename_display).pack(side="left", padx=6)
         ttk.Button(actions, text="文件信息", command=self.file_info).pack(side="left")
+        ttk.Button(actions, text="关闭设置", command=lambda: self.show_close_dialog(True)).pack(side="right")
         ttk.Label(frame, textvariable=self.now, font=("Microsoft YaHei UI", 12)).pack(anchor="w", pady=(8, 4))
         timeline = ttk.Frame(frame)
         timeline.pack(fill="x")
@@ -117,7 +132,6 @@ class Application:
         self.pause_button = ttk.Button(controls, text="播放", command=self.toggle_play)
         self.pause_button.pack(side="left", padx=6)
         ttk.Button(controls, text="下一首", command=lambda: self.launch(self.playback.skip(1))).pack(side="left")
-        ttk.Button(controls, text="停止", command=lambda: self.launch(self.playback.stop())).pack(side="left", padx=6)
         modes = ttk.Combobox(controls, values=MODES, state="readonly", textvariable=self.mode, width=12)
         modes.pack(side="left", padx=12)
         modes.bind("<<ComboboxSelected>>", self.change_mode)
@@ -376,15 +390,196 @@ class Application:
             if track:
                 prefix = "已暂停" if self.playback.paused else ("正在播放" if self.playback.active else "已停止")
                 self.now.set(f"{prefix} · {self.state['names'].get(track.path, track.title)}  {track.artist}")
-            self.pause_button.configure(text="暂停" if self.playback.active and not self.playback.paused else "播放")
+            self.pause_button.configure(text=self.transport_label())
             self.slider.configure(to=max(1, self.playback.duration))
             if not self.dragging:
                 self.progress.set(self.playback.position)
             self.time_text.set(f"{clock_text(self.playback.position)} / {clock_text(self.playback.duration)}")
             await asyncio.sleep(0.2)
 
+    def on_window_close(self) -> None:
+        """Apply the saved X-button policy, leaving explicit Exit unconditional."""
+        if self.closing:
+            return
+        action = self.state.get("close_action", "ask")
+        if action == "tray":
+            self.minimize_to_tray()
+        elif action == "exit":
+            self.request_close()
+        else:
+            self.show_close_dialog()
+
+    def show_close_dialog(self, settings_only: bool = False) -> None:
+        """Ask without wait_window so playback and asyncio keep running."""
+        if self.close_dialog and self.close_dialog.winfo_exists():
+            self.close_dialog.lift()
+            return
+        dialog = self.close_dialog = tk.Toplevel(self.root)
+        dialog.title("关闭设置" if settings_only else "关闭播放器")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        body = ttk.Frame(dialog, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="点击右上角 X 时：" if settings_only else "你希望如何关闭播放器？").pack(anchor="w", pady=(0, 12))
+        initial = self.state.get("close_action", "ask")
+        action = tk.StringVar(value=initial if settings_only or initial != "ask" else "tray")
+        remember = tk.BooleanVar(value=False)
+        if settings_only:
+            ttk.Radiobutton(body, text="每次询问", value="ask", variable=action).pack(anchor="w", pady=4)
+        ttk.Radiobutton(body, text="最小化到系统托盘，继续播放", value="tray", variable=action).pack(anchor="w", pady=4)
+        ttk.Radiobutton(body, text="退出播放器，停止播放", value="exit", variable=action).pack(anchor="w", pady=4)
+        if not settings_only:
+            ttk.Checkbutton(body, text="记住选择（可在关闭设置中修改）", variable=remember).pack(anchor="w", pady=12)
+
+        def dismiss() -> None:
+            """Cancel without changing playback or persisted preferences."""
+            dialog.grab_release()
+            dialog.destroy()
+            self.close_dialog = None
+
+        def confirm() -> None:
+            """Persist only accepted actions and keep a failed tray operation recoverable."""
+            choice, persist = action.get(), remember.get()
+            dismiss()
+            if settings_only:
+                self.state["close_action"] = choice
+                self.schedule_save()
+            else:
+                self.apply_close_choice(choice, persist)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="取消", command=dismiss).pack(side="right")
+        ttk.Button(buttons, text="保存" if settings_only else "确定", command=confirm).pack(side="right", padx=8)
+        dialog.protocol("WM_DELETE_WINDOW", dismiss)
+        dialog.bind("<Escape>", lambda event: dismiss())
+        dialog.grab_set()
+        dialog.focus_set()
+
+    def apply_close_choice(self, choice: str, remember: bool) -> None:
+        """Execute the chosen close action without confusing tray hiding with shutdown."""
+        if choice == "tray" and not self.minimize_to_tray():
+            return
+        if remember:
+            self.state["close_action"] = choice
+            self.schedule_save()
+        if choice == "exit":
+            self.request_close()
+
+    def minimize_to_tray(self) -> bool:
+        """Hide only after Windows has accepted the tray icon."""
+        self.dismiss_tray_menu()
+        try:
+            if self.tray is None:
+                self.tray = WindowsTray()
+            self.tray.show()
+        except Exception as exc:
+            log.exception("Cannot create notification icon")
+            messagebox.showerror("无法最小化到托盘", f"{exc}\n窗口将保持打开，你仍可选择退出。", parent=self.root)
+            return False
+        if not self.hidden_to_tray:
+            self.hidden_children = [child for child in self.root.winfo_children()
+                                    if isinstance(child, tk.Toplevel) and child.winfo_viewable()]
+            for child in self.hidden_children:
+                child.withdraw()
+            self.hidden_to_tray = True
+            self.root.withdraw()
+        return True
+
+    def restore_window(self) -> None:
+        """Restore the player before removing its alternative access point."""
+        self.dismiss_tray_menu()
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.hidden_to_tray = False
+        for child in self.hidden_children:
+            if child.winfo_exists():
+                child.deiconify()
+        self.hidden_children.clear()
+        if self.tray:
+            self.tray.hide()
+
+    def process_tray_events(self) -> None:
+        """Drain native notifications between Tk updates on the main asyncio thread."""
+        if not self.tray:
+            return
+        while self.tray.events and not self.closing:
+            event = self.tray.events.popleft()
+            if event == "restore":
+                self.restore_window()
+            elif event == "menu":
+                self.show_tray_menu()
+            elif event == "recreate":
+                try:
+                    self.tray.recreate()
+                except Exception:
+                    log.exception("Cannot restore tray after Explorer restart")
+                    self.restore_window()
+                    self.status.set("系统托盘恢复失败，已重新显示播放器")
+
+    def update_tray_menu(self) -> None:
+        """Describe the current transport state when opening the tray menu."""
+        label = self.transport_label()
+        can_play = self.playback.current is not None or self.selected() is not None
+        self.tray_menu.entryconfigure(1, label=label, state="normal" if can_play else "disabled")
+        for index, step in ((2, -1), (3, 1)):
+            available = self.playback.next_index(step) is not None
+            self.tray_menu.entryconfigure(index, state="normal" if available else "disabled")
+
+    def transport_label(self) -> str:
+        """Use one consistent play/pause/resume action in both surfaces."""
+        return "继续" if self.playback.paused else ("暂停" if self.playback.active else "播放")
+
+    def dismiss_tray_menu(self) -> None:
+        """Close the nonmodal popup without affecting the hidden player."""
+        if self.tray_popup:
+            self.tray_popup.destroy()
+            self.tray_popup = None
+
+    def show_tray_menu(self) -> None:
+        """Display a nonmodal Tk popup instead of entering Windows' blocking menu loop."""
+        self.dismiss_tray_menu()
+        self.update_tray_menu()
+        popup = self.tray_popup = tk.Toplevel(self.root)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        frame = ttk.Frame(popup, padding=5, relief="solid", borderwidth=1)
+        frame.pack(fill="both", expand=True)
+
+        def select(index: int) -> None:
+            """Dismiss before invoking a transport action on the main thread."""
+            self.dismiss_tray_menu()
+            self.tray_menu.invoke(index)
+
+        def dismiss_if_unfocused() -> None:
+            """Keep focus moves between popup children from closing the menu."""
+            if self.tray_popup is not popup:
+                return
+            focused = self.root.focus_get()
+            if focused is None or focused.winfo_toplevel() is not popup:
+                self.dismiss_tray_menu()
+
+        for index in range(self.tray_menu.index("end") + 1):
+            if self.tray_menu.type(index) == "separator":
+                ttk.Separator(frame).pack(fill="x", pady=4)
+            else:
+                ttk.Button(frame, text=self.tray_menu.entrycget(index, "label"), width=20,
+                           state=self.tray_menu.entrycget(index, "state"),
+                           command=lambda index=index: select(index)).pack(fill="x")
+        popup.bind("<Escape>", lambda event: self.dismiss_tray_menu())
+        popup.bind("<FocusOut>", lambda event: popup.after_idle(dismiss_if_unfocused))
+        popup.update_idletasks()
+        x = max(0, min(self.root.winfo_pointerx(), self.root.winfo_screenwidth() - popup.winfo_reqwidth()))
+        y = max(0, min(self.root.winfo_pointery(), self.root.winfo_screenheight() - popup.winfo_reqheight()))
+        popup.geometry(f"+{x}+{y}")
+        popup.deiconify()
+        popup.focus_force()
+
     def request_close(self) -> None:
         """Signal graceful async shutdown rather than destroying widgets mid-task."""
+        self.dismiss_tray_menu()
         self.closing = True
 
     async def run(self) -> None:
@@ -394,9 +589,15 @@ class Application:
         try:
             while not self.closing:
                 self.root.update()
-                await asyncio.sleep(0.016)
+                self.process_tray_events()
+                await asyncio.sleep(0.05 if self.hidden_to_tray else 0.016)
         finally:
             self.closing = True
+            if self.tray:
+                try:
+                    self.tray.close()
+                except Exception:
+                    log.exception("Cannot fully release tray resources")
             # Cancel read-only producers, but let decoder commands and writes finish.
             for task in (self.scan_task, self.render_task, monitor):
                 if task:
@@ -406,14 +607,19 @@ class Application:
                 await self.save()
             except Exception as exc:
                 log.exception("Cannot save library")
+                self.root.deiconify()
                 messagebox.showerror("配置保存失败", str(exc), parent=self.root)
             finally:
-                await self.playback.close()
-                self.root.destroy()
+                try:
+                    await self.playback.close()
+                finally:
+                    self.root.destroy()
 
 
 async def main() -> None:
     """Construct the application and its sole shared blocking pool."""
+    if sys.platform != "win32":
+        raise RuntimeError("拾音仅支持 Windows；不支持 Linux 或 macOS。")
     loop = asyncio.get_running_loop()
     pool = ThreadPoolExecutor(max_workers=settings.IO_WORKERS, thread_name_prefix="music-io")
     loop.set_default_executor(pool)

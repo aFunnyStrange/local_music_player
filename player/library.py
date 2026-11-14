@@ -107,7 +107,7 @@ async def scan_library(roots: list[str], extensions: frozenset, batch_size: int,
 def default_state(root: Path) -> dict:
     """Provide a versioned local library with no dependency on the legacy project."""
     return {"version": 1, "roots": [str(root)], "favorites": [], "names": {},
-            "volume": 60, "mode": "顺序播放"}
+            "volume": 60, "mode": "顺序播放", "close_action": "ask"}
 
 
 def load_state(path: Path, root: Path) -> dict:
@@ -129,6 +129,8 @@ def load_state(path: Path, root: Path) -> dict:
         raise ValueError("音量配置必须在 0 到 100 之间")
     if raw.get("mode") not in ("顺序播放", "列表循环", "单曲循环", "随机播放"):
         raise ValueError("播放模式配置无效")
+    if raw.get("close_action", "ask") not in ("ask", "tray", "exit"):
+        raise ValueError("关闭行为配置无效")
     state.update(raw)
     return state
 

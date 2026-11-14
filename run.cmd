@@ -7,7 +7,13 @@ if not exist ".venv\Scripts\python.exe" (
   popd
   exit /b 1
 )
-".venv\Scripts\python.exe" main.py
-if errorlevel 1 pause
+".venv\Scripts\python.exe" -c "import player.app"
+if errorlevel 1 (
+  echo Please run .venv\Scripts\python.exe -m pip install -r requirements.txt
+  pause
+  popd
+  exit /b 1
+)
+start "" ".venv\Scripts\pythonw.exe" main.py
 popd
 endlocal

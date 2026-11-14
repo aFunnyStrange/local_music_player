@@ -4,6 +4,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 LIBRARY_DIR = BASE_DIR / "library"
 STATE_FILE = BASE_DIR / "data" / "library.json"
+LOG_FILE = BASE_DIR / "data" / "player.log"
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 2
 VLC_DIR = BASE_DIR / ".runtime" / "vlc-3.0.21"
 IO_WORKERS = 2
 SCAN_BATCH_SIZE = 32
