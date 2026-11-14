@@ -1,6 +1,20 @@
 # 拾音 · 独立本地音乐播放器
 
-这是独立应用，原目录中的学习代码、爬虫、EXE 和音乐文件均不依赖、不修改。
+**拾音（local_music_player）** 是一个基于 Python、Tkinter 和 VLC 的本地音乐库播放器。把分散在多个文件夹中的音乐放到同一个界面里搜索、收藏和播放，让歌曲管理由自己掌控。
+
+项目起源于一个实际困扰：来自不同音乐平台的本地文件，可能带着乱码、错误或无意义的内嵌标签。拾音会尝试恢复常见标签编码错误，无法可靠恢复时回退到正常文件名；这些处理只影响播放器中的显示，不会改写音乐文件。
+
+## 核心特点
+
+- **自由组织音乐库**：添加多个文件夹、递归扫描子目录，无需复制或集中搬迁音乐。
+- **让歌名可读、可找**：常见乱码恢复、无效标签过滤、文件名回退，以及跨目录关键词搜索。
+- **统一播放控制**：通过 libVLC 播放 MP3、FLAC、M4A、MKA 等音频，支持暂停、切歌、定位、音量和四种播放模式。
+- **保留原文件**：收藏和自定义名称独立保存，移除音乐目录也不会删除歌曲。
+- **异步任务管理**：使用 asyncio 管理扫描、播放监视与保存；必要的同步接口使用有界线程池，不使用多进程。
+
+这是一个本地桌面应用，不提供在线曲库、音乐下载或 DRM 解密。当前主要在 Windows 上验证。
+
+> A local music library player built with Python, Tkinter and VLC. Organize multiple folders, recover common garbled tags, and play your own music without rewriting the original files.
 
 ## 启动
 
@@ -9,7 +23,14 @@ Windows 便携 VLC 可解压到 `.runtime/vlc-3.0.21`，该目录下应直接包
 也可安装 [VLC 官方桌面版](https://www.videolan.org/vlc/)。
 Python 依赖只包含元数据读取和 libVLC 绑定，不会启动 VLC 子进程。
 
-在本目录执行：
+先获取源码并进入项目目录：
+
+```powershell
+git clone https://github.com/aFunnyStrange/local_music_player.git
+cd local_music_player
+```
+
+也可以从仓库的 Code → Download ZIP 下载并解压源码。然后在项目目录执行：
 
 ```powershell
 python -m venv .venv
@@ -17,8 +38,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe main.py
 ```
 
-如已由开发验证创建好 .venv 和便携运行库，直接双击 run.cmd，或执行最后一行。
-原来的 EXE 仍是旧版，不会自动包含新功能。
+首次运行需要自行创建虚拟环境并安装上述依赖；仓库不包含 `.venv`、VLC 运行库或音乐文件。配置完成后，可双击 `run.cmd` 启动，或执行上面的最后一行。
 
 ## 使用
 
