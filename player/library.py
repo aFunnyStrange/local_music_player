@@ -11,6 +11,7 @@ from typing import AsyncIterator
 from mutagen import File, MutagenError
 
 from .metadata import resolve_metadata
+from .search import compile_query, matches
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ async def scan_library(roots: list[str], extensions: frozenset, batch_size: int,
 def default_state(root: Path) -> dict:
     """Provide a versioned local library with no dependency on the legacy project."""
     return {"version": 1, "roots": [str(root)], "favorites": [], "names": {},
-            "volume": 60, "mode": "顺序播放", "close_action": "ask"}
+            "volume": 60, "mode": "列表循环", "close_action": "ask"}
 
 
 def load_state(path: Path, root: Path) -> dict:
@@ -127,7 +128,9 @@ def load_state(path: Path, root: Path) -> dict:
     volume = raw.get("volume", 60)
     if isinstance(volume, bool) or not isinstance(volume, (int, float)) or not 0 <= volume <= 100:
         raise ValueError("音量配置必须在 0 到 100 之间")
-    if raw.get("mode") not in ("顺序播放", "列表循环", "单曲循环", "随机播放"):
+    if raw.get("mode") == "顺序播放":
+        raw["mode"] = "列表循环"
+    if raw.get("mode") not in ("列表循环", "单曲循环", "随机播放"):
         raise ValueError("播放模式配置无效")
     if raw.get("close_action", "ask") not in ("ask", "tray", "exit"):
         raise ValueError("关闭行为配置无效")
@@ -149,14 +152,14 @@ def save_state(path: Path, state: dict) -> None:
 def visible_tracks(tracks: list[Track], query: str, favorites: set[str],
                    names: dict[str, str], only_favorites: bool) -> list[Track]:
     """Search every keyword across display name, tags and original filename."""
-    words = search_key(query).split()
+    groups = compile_query(query)
     result = []
     for track in tracks:
         if only_favorites and track.path not in favorites:
             continue
         haystack = search_key(" ".join((names.get(track.path, track.title), track.artist,
                                        track.album, Path(track.path).name)))
-        if all(word in haystack for word in words):
+        if matches(haystack, groups):
             result.append(track)
     return sorted(result, key=lambda track: search_key(names.get(track.path, track.title)))
 

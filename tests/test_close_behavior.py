@@ -76,12 +76,12 @@ class CloseBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.app.closing)
 
     async def test_transport_menu_labels_and_boundaries(self) -> None:
-        """Menu commands follow pause/stop state and sequential queue bounds."""
+        """Menu commands follow transport state and allow wrapping at queue bounds."""
         tracks = [Track("a", "甲"), Track("b", "乙")]
         await self.player.play(tracks, 0)
         self.app.update_tray_menu()
         self.assertEqual(self.app.tray_menu.entrycget(1, "label"), "暂停")
-        self.assertEqual(self.app.tray_menu.entrycget(2, "state"), "disabled")
+        self.assertEqual(self.app.tray_menu.entrycget(2, "state"), "normal")
         self.assertEqual(self.app.tray_menu.entrycget(3, "state"), "normal")
         await self.player.toggle_pause()
         self.app.update_tray_menu()
@@ -101,3 +101,34 @@ class CloseBehaviorTests(unittest.IsolatedAsyncioTestCase):
         save_state(self.app.state_file, state)
         with self.assertRaises(ValueError):
             load_state(self.app.state_file, self.directory)
+
+    async def test_slider_click_drag_and_boundaries(self) -> None:
+        """Mouse events use real Tk geometry; each completed gesture commits once."""
+        await self.player.play([Track("a", "甲")], 0)
+        self.player.duration = 100
+        self.app.slider.configure(to=100)
+        self.root.deiconify()
+        self.root.update()
+        slider = self.app.slider
+        x, y = int(slider.winfo_width() * 0.75), slider.winfo_height() // 2
+        expected = float(slider.get(x, y))
+        self.player.backend.seek = Mock(wraps=self.player.backend.seek)
+        slider.event_generate("<ButtonPress-1>", x=x, y=y)
+        slider.event_generate("<ButtonRelease-1>", x=x, y=y)
+        await asyncio.gather(*list(self.app.tasks))
+        self.assertAlmostEqual(self.player.position, expected)
+        self.assertEqual(self.player.backend.seek.call_count, 1)
+        slider.event_generate("<ButtonPress-1>", x=0, y=y)
+        slider.event_generate("<B1-Motion>", x=slider.winfo_width() + 30, y=y)
+        slider.event_generate("<ButtonRelease-1>", x=slider.winfo_width() + 30, y=y)
+        await asyncio.gather(*list(self.app.tasks))
+        self.assertEqual(self.player.position, 100)
+        self.assertEqual(self.player.backend.seek.call_count, 2)
+        volume = self.app.volume_slider
+        x, y = volume.winfo_width() // 4, volume.winfo_height() // 2
+        expected = round(float(volume.get(x, y)))
+        volume.event_generate("<ButtonPress-1>", x=x, y=y)
+        volume.event_generate("<ButtonRelease-1>", x=x, y=y)
+        await asyncio.gather(*list(self.app.tasks))
+        self.assertEqual(self.player.volume, expected)
+        self.assertEqual(self.app.snapshot_state()["volume"], expected)

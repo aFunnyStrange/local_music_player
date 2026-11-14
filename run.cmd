@@ -2,18 +2,20 @@
 setlocal
 pushd "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
-  echo Please follow README.md to create .venv and install dependencies.
-  pause
-  popd
-  exit /b 1
+  goto setup
 )
-".venv\Scripts\python.exe" -c "import player.app"
+".venv\Scripts\python.exe" -m scripts.verify_runtime >nul 2>&1
+if errorlevel 1 goto setup
+goto launch
+:setup
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup.ps1"
 if errorlevel 1 (
-  echo Please run .venv\Scripts\python.exe -m pip install -r requirements.txt
+  echo Setup failed. Resolve the error above, then run setup.cmd again.
   pause
   popd
   exit /b 1
 )
+:launch
 start "" ".venv\Scripts\pythonw.exe" main.py
 popd
 endlocal

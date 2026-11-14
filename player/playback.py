@@ -7,7 +7,7 @@ from typing import Optional
 
 from .library import Track
 
-MODES = ("顺序播放", "列表循环", "单曲循环", "随机播放")
+MODES = ("列表循环", "单曲循环", "随机播放")
 
 
 class VlcBackend:
@@ -137,7 +137,7 @@ class Playback:
                 self.paused = paused
 
     def next_index(self, step: int = 1, automatic: bool = False) -> Optional[int]:
-        """Calculate finite sequential, repeat and random transitions."""
+        """Calculate wrapping repeat and random transitions."""
         if not self.queue:
             return None
         if automatic and self.mode == "单曲循环":
@@ -145,12 +145,10 @@ class Playback:
         if self.mode == "随机播放" and len(self.queue) > 1:
             return random.choice([i for i in range(len(self.queue)) if i != self.index])
         index = self.index + step
-        if self.mode in ("列表循环", "单曲循环", "随机播放"):
-            return index % len(self.queue)
-        return index if 0 <= index < len(self.queue) else None
+        return index % len(self.queue)
 
     async def skip(self, step: int) -> None:
-        """Move once; a boundary in sequential mode does not wrap."""
+        """Move once, wrapping at either end of the queue."""
         async with self.lock:
             if self.closed:
                 return

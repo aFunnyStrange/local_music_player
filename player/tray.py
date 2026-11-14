@@ -4,6 +4,7 @@ from collections import deque
 import win32api
 import win32con
 import win32gui
+import settings
 
 class WindowsTray:
     """Own a hidden Win32 window and icon without a dedicated thread or process."""
@@ -25,8 +26,17 @@ class WindowsTray:
         try:
             self.hwnd = win32gui.CreateWindow(self.class_name, "拾音托盘消息窗口", 0,
                                              0, 0, 0, 0, 0, 0, self.instance, None)
-            self.icon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
+            self.owns_icon = settings.ICON_FILE.is_file()
+            if self.owns_icon:
+                self.icon = win32gui.LoadImage(0, str(settings.ICON_FILE), win32con.IMAGE_ICON,
+                                              win32api.GetSystemMetrics(win32con.SM_CXSMICON),
+                                              win32api.GetSystemMetrics(win32con.SM_CYSMICON),
+                                              win32con.LR_LOADFROMFILE)
+            else:
+                self.icon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
         except Exception:
+            if hasattr(self, "hwnd"):
+                win32gui.DestroyWindow(self.hwnd)
             win32gui.UnregisterClass(self.class_name, self.instance)
             raise
 
@@ -82,3 +92,5 @@ class WindowsTray:
             win32gui.DestroyWindow(self.hwnd)
             win32gui.UnregisterClass(self.class_name, self.instance)
             self.events.clear()
+            if self.owns_icon:
+                win32gui.DestroyIcon(self.icon)

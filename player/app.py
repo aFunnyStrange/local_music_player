@@ -22,6 +22,16 @@ def clock_text(seconds: float) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def set_scale_from_pointer(event: tk.Event) -> str:
+    """Map a mouse point through Tk's real trough geometry and suppress page-step behavior."""
+    scale = event.widget
+    if not scale.instate(["disabled"]):
+        lower, upper = sorted((float(scale.cget("from")), float(scale.cget("to"))))
+        scale.set(min(upper, max(lower, float(scale.get(event.x, event.y)))))
+        scale.focus_set()
+    return "break"
+
+
 class Application:
     """Own all widgets and tasks; background workers never access Tk."""
 
@@ -56,6 +66,7 @@ class Application:
         self.volume = tk.DoubleVar(value=state["volume"])
         self.progress = tk.DoubleVar()
         self.dragging = False
+        self.seek_track: Optional[Track] = None
         playback.mode, playback.volume = state["mode"], int(state["volume"])
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
@@ -71,6 +82,8 @@ class Application:
         """Compose a searchable library, real scrollbars and stable playback controls."""
         root = self.root
         root.title("拾音 · 本地音乐播放器")
+        if settings.ICON_FILE.is_file():
+            root.iconbitmap(str(settings.ICON_FILE))
         root.geometry("1100x720")
         root.minsize(800, 480)
         style = ttk.Style(root)
@@ -88,12 +101,14 @@ class Application:
         ttk.Checkbutton(toolbar, text="只看收藏", variable=self.only_favorites,
                         command=self.render).pack(side="right")
         search = ttk.Frame(frame)
-        search.pack(fill="x", pady=(0, 12))
+        search.pack(fill="x", pady=(0, 4))
         ttk.Label(search, text="搜索歌曲 / 歌手 / 专辑 / 文件名").pack(side="left", padx=(0, 12))
         self.search_entry = ttk.Entry(search, textvariable=self.query)
         self.search_entry.pack(side="left", fill="x", expand=True)
         ttk.Button(search, text="清空", command=lambda: self.query.set("")).pack(side="left", padx=(8, 0))
         self.query.trace_add("write", self.search_changed)
+        ttk.Label(frame, text='空格：同时匹配   "Love Theme"：完整短语   !live：排除   周杰伦 | 林俊杰：任选其一   *.flac：格式',
+                  wraplength=1000).pack(anchor="w", pady=(0, 8))
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
         columns = ("favorite", "title", "artist", "album", "duration", "file")
@@ -124,7 +139,9 @@ class Application:
         self.slider = ttk.Scale(timeline, from_=0, to=1, variable=self.progress)
         self.slider.pack(side="left", fill="x", expand=True)
         self.slider.bind("<ButtonPress-1>", self.begin_seek)
+        self.slider.bind("<B1-Motion>", self.drag_seek)
         self.slider.bind("<ButtonRelease-1>", self.end_seek)
+        self.slider.bind("<KeyRelease>", lambda event: self.launch(self.playback.seek(self.progress.get())))
         ttk.Label(timeline, textvariable=self.time_text, width=17, anchor="e").pack(side="right")
         controls = ttk.Frame(frame)
         controls.pack(fill="x", pady=8)
@@ -135,10 +152,12 @@ class Application:
         modes = ttk.Combobox(controls, values=MODES, state="readonly", textvariable=self.mode, width=12)
         modes.pack(side="left", padx=12)
         modes.bind("<<ComboboxSelected>>", self.change_mode)
-        volume = ttk.Scale(controls, from_=0, to=100, variable=self.volume)
-        volume.pack(side="right")
-        volume.bind("<ButtonRelease-1>", self.change_volume)
-        volume.bind("<KeyRelease>", self.change_volume)
+        self.volume_slider = ttk.Scale(controls, from_=0, to=100, variable=self.volume)
+        self.volume_slider.pack(side="right")
+        self.volume_slider.bind("<ButtonPress-1>", set_scale_from_pointer)
+        self.volume_slider.bind("<B1-Motion>", set_scale_from_pointer)
+        self.volume_slider.bind("<ButtonRelease-1>", self.end_volume)
+        self.volume_slider.bind("<KeyRelease>", self.change_volume)
         ttk.Label(controls, text="音量").pack(side="right", padx=8)
         ttk.Label(frame, textvariable=self.status, wraplength=1000).pack(anchor="w")
         root.bind("<Control-f>", self.focus_search)
@@ -345,14 +364,35 @@ class Application:
         self.launch(self.playback.set_volume(round(self.volume.get())))
         self.schedule_save()
 
-    def begin_seek(self, event=None) -> None:
-        """Temporarily stop progress updates while the user drags."""
-        self.dragging = True
+    def end_volume(self, event: tk.Event) -> str:
+        """Commit the clicked or dragged volume once when releasing the mouse."""
+        set_scale_from_pointer(event)
+        self.change_volume()
+        return "break"
 
-    def end_seek(self, event=None) -> None:
-        """Seek to the user-selected position and resume progress updates."""
+    def begin_seek(self, event: tk.Event) -> str:
+        """Temporarily stop progress updates while the user drags."""
+        if self.slider.instate(["disabled"]):
+            return "break"
+        self.dragging = True
+        self.seek_track = self.playback.current
+        return set_scale_from_pointer(event)
+
+    def drag_seek(self, event: tk.Event) -> str:
+        """Preview the dragged position without submitting an audio command per pixel."""
+        if self.dragging:
+            set_scale_from_pointer(event)
+        return "break"
+
+    def end_seek(self, event: tk.Event) -> str:
+        """Commit a click or drag once, ignoring a track changed during the gesture."""
+        if not self.dragging:
+            return "break"
+        set_scale_from_pointer(event)
         self.dragging = False
-        self.launch(self.playback.seek(self.progress.get()))
+        if self.seek_track is self.playback.current:
+            self.launch(self.playback.seek(self.progress.get()))
+        return "break"
 
     def snapshot_state(self) -> dict:
         """Create a detached snapshot so worker writes cannot race with UI edits."""
@@ -392,6 +432,7 @@ class Application:
                 self.now.set(f"{prefix} · {self.state['names'].get(track.path, track.title)}  {track.artist}")
             self.pause_button.configure(text=self.transport_label())
             self.slider.configure(to=max(1, self.playback.duration))
+            self.slider.state(["!disabled"] if self.playback.active and self.playback.duration > 0 else ["disabled"])
             if not self.dragging:
                 self.progress.set(self.playback.position)
             self.time_text.set(f"{clock_text(self.playback.position)} / {clock_text(self.playback.duration)}")

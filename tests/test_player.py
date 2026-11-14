@@ -77,14 +77,16 @@ class PlaybackTests(unittest.IsolatedAsyncioTestCase):
         await self.player.skip(1)
         self.assertEqual(self.backend.paths, ["a", "b"])
 
-    async def test_sequential_end_stops_once(self) -> None:
-        """End of queue does not overflow or restart on the next monitor tick."""
+    async def test_default_mode_wraps_once(self) -> None:
+        """The default mode wraps after the final track, without duplicate starts."""
         await self.player.play(self.tracks, 1)
         self.backend.state = "Ended"
         await self.player.tick()
         await self.player.tick()
-        self.assertFalse(self.player.active)
-        self.assertEqual(self.backend.paths, ["b"])
+        self.assertTrue(self.player.active)
+        self.assertEqual(self.backend.paths, ["b", "a"])
+        await self.player.skip(-1)
+        self.assertEqual(self.player.current.path, "b")
 
     async def test_mode_change_and_queue_snapshot(self) -> None:
         """Changing mode takes effect at natural end without changing playback immediately."""
@@ -150,6 +152,17 @@ def make_wave(path: Path, seconds: int = 1) -> None:
 
 class LibraryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Exercise actual metadata reads, traversal and atomic persistence."""
+
+    async def test_legacy_mode_migration(self) -> None:
+        """Old sequential preferences load as repeat without losing other data."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state = default_state(root)
+            state["mode"] = "顺序播放"
+            state["names"] = {"example": "自定义名称"}
+            save_state(root / "state.json", state)
+            state["mode"] = "列表循环"
+            self.assertEqual(load_state(root / "state.json", root), state)
 
     async def test_scan_search_and_roundtrip(self) -> None:
         """Overlapping roots deduplicate Unicode files and preserve virtual metadata."""
