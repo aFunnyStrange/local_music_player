@@ -1,0 +1,7 @@
+.venv/
+.runtime/
+__pycache__/
+data/
+library/*
+!library/.gitkeep
+
