@@ -1,6 +1,11 @@
 name: Windows build
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag (leave blank for build only)'
+        required: false
+        type: string
   pull_request:
     paths-ignore: ['backup/**']
   push:
@@ -16,6 +21,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - name: Prepare pinned Rust and VLC runtime
         shell: powershell
         run: ./scripts/setup.ps1
@@ -23,18 +30,33 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - name: Check tag matches release version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         shell: powershell
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
           $expected = 'v' + ($metadata.packages | Where-Object name -eq 'shiyin-rs').version
-          if ($env:GITHUB_REF_NAME -ne $expected) { throw 'Tag and build version differ' }
+          if ($env:RELEASE_TAG -ne $expected) { throw 'Tag and build version differ' }
+          git rev-parse --verify "refs/tags/$expected"
+          if ($LASTEXITCODE -ne 0) { throw 'Release tag does not exist' }
+          # A pipeline-only repair may publish the existing tag, never changed application code.
+          git diff --exit-code "refs/tags/$expected" HEAD -- src tests assets Cargo.toml Cargo.lock build.rs .cargo rust-toolchain.toml toolchain.json
+          if ($LASTEXITCODE -ne 0) { throw 'Application sources differ from the release tag' }
+      - name: Configure headless runner audio
+        shell: pwsh
+        run: |
+          # Hosted runners have no playback device. Decode and clock audio through VLC's dummy output.
+          $audioConfig = Join-Path $env:RUNNER_TEMP 'shiyin-audio-config'
+          New-Item -ItemType Directory -Force -Path "$audioConfig/vlc" | Out-Null
+          "[core]`naout=dummy" | Set-Content -LiteralPath "$audioConfig/vlc/vlcrc" -Encoding utf8NoBOM
+          "APPDATA=$audioConfig" >> $env:GITHUB_ENV
       - name: Build and verify executable
         shell: powershell
         run: ./scripts/build_release.ps1
       - name: Collect third-party sources
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         shell: pwsh
         run: ./scripts/build_sources.ps1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -48,7 +70,7 @@ jobs:
             docs/releases/*.md
           if-no-files-found: error
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -62,7 +84,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           cd artifacts/dist
           sha256sum --check *.sha256

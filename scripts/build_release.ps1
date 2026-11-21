@@ -63,9 +63,13 @@ try {
     try {
         $env:SHIYIN_VLC_DIR = Join-Path $bundle 'vlc'
         $env:PATH = Join-Path $env:SystemRoot 'System32'
-        $process = Start-Process -FilePath (Join-Path $bundle 'Shiyin.exe') -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru -WindowStyle Hidden
+        $errorLog = Join-Path $dist 'verification-stderr.txt'
+        $process = Start-Process -FilePath (Join-Path $bundle 'Shiyin.exe') -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru -WindowStyle Hidden -RedirectStandardError $errorLog
         if (-not $process.WaitForExit(60000)) { $process.Kill(); throw 'Packaged verification timed out' }
-        if ($process.ExitCode -ne 0) { throw 'Packaged verification failed' }
+        if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $errorLog) { Get-Content -LiteralPath $errorLog | Write-Host }
+            throw "Packaged verification failed (exit $($process.ExitCode))"
+        }
         if (-not (Get-Content -LiteralPath $report -Raw | ConvertFrom-Json).passed) { throw 'Verification did not pass' }
     } finally { $env:SHIYIN_VLC_DIR = $oldVlc; $env:PATH = $oldPath }
     $zip = Join-Path $dist ('Shiyin-' + $package.version + '-windows-x64.zip')
