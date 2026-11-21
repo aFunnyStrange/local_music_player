@@ -44,17 +44,9 @@ jobs:
           # A pipeline-only repair may publish the existing tag, never changed application code.
           git diff --exit-code "refs/tags/$expected" HEAD -- src tests assets Cargo.toml Cargo.lock build.rs .cargo rust-toolchain.toml toolchain.json
           if ($LASTEXITCODE -ne 0) { throw 'Application sources differ from the release tag' }
-      - name: Configure headless runner audio
-        shell: pwsh
-        run: |
-          # Hosted runners have no playback device. Decode and clock audio through VLC's dummy output.
-          $audioConfig = Join-Path $env:RUNNER_TEMP 'shiyin-audio-config'
-          New-Item -ItemType Directory -Force -Path "$audioConfig/vlc" | Out-Null
-          "[core]`naout=dummy" | Set-Content -LiteralPath "$audioConfig/vlc/vlcrc" -Encoding utf8NoBOM
-          "APPDATA=$audioConfig" >> $env:GITHUB_ENV
       - name: Build and verify executable
         shell: powershell
-        run: ./scripts/build_release.ps1
+        run: ./scripts/build_release.ps1 -HeadlessAudio
       - name: Collect third-party sources
         if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         shell: pwsh

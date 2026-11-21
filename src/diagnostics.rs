@@ -1,5 +1,5 @@
 //! Full native playback and persistence diagnostic, using temporary silent audio.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use shiyin_rs::{
     library,
     model::{Mode, State},
@@ -105,13 +105,14 @@ pub async fn verify_import(source: PathBuf, report: PathBuf) -> Result<()> {
     ensure!(passed, "Temporary import round trip failed");
     Ok(())
 }
-pub async fn run(api: Arc<Api>, report: PathBuf) -> Result<()> {
+pub async fn run(api: Arc<Api>, report: PathBuf, headless_audio: bool) -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let root = fixture.path().to_owned();
     let generate = root.clone();
     tokio::task::spawn_blocking(move || {
-        wave(&generate.join("歌手 - 测试甲.wav"), 1)?;
-        wave(&generate.join("歌手 - 测试乙.wav"), 1)
+        // Leave enough audio beyond VLC prebuffering for pause/seek assertions.
+        wave(&generate.join("歌手 - 测试甲.wav"), 4)?;
+        wave(&generate.join("歌手 - 测试乙.wav"), 4)
     })
     .await??;
     let roots = vec![
@@ -151,18 +152,26 @@ pub async fn run(api: Arc<Api>, report: PathBuf) -> Result<()> {
         .send(Command::Play(scan.tracks.clone(), 1))
         .await?;
     let result: Result<()> = async {
-        wait(&player.state, |s| s.duration > 0.0).await?;
+        wait(&player.state, |s| s.duration > 0.0)
+            .await
+            .context("initial playback duration")?;
         player.commands.send(Command::Toggle).await?;
-        wait(&player.state, |s| s.paused).await?;
+        wait(&player.state, |s| s.paused)
+            .await
+            .context("pause state")?;
         player.commands.send(Command::Seek(0.2)).await?;
         player.commands.send(Command::Toggle).await?;
-        wait(&player.state, |s| s.starts >= 2).await?;
+        wait(&player.state, |s| s.starts >= 2)
+            .await
+            .context("repeat-all transition")?;
         ensure!(
             player.state.borrow().current.as_ref().unwrap().path == scan.tracks[0].path,
             "list did not wrap"
         );
         player.commands.send(Command::Mode(Mode::RepeatOne)).await?;
-        wait(&player.state, |s| s.starts >= 3).await?;
+        wait(&player.state, |s| s.starts >= 3)
+            .await
+            .context("repeat-one transition")?;
         ensure!(
             player.state.borrow().current.as_ref().unwrap().path == scan.tracks[0].path,
             "repeat one failed"
@@ -185,7 +194,7 @@ pub async fn run(api: Arc<Api>, report: PathBuf) -> Result<()> {
     )
     .await?;
     ensure!(cancelled.cancelled);
-    tokio::fs::write(report, serde_json::to_vec_pretty(&serde_json::json!({"passed":true,"checks":["native VLC playback", "seek", "pause", "repeat all", "repeat one", "scan", "cancellation", "search", "playlists", "atomic state"]}))?).await?;
+    tokio::fs::write(report, serde_json::to_vec_pretty(&serde_json::json!({"passed":true,"audio_output":if headless_audio { "dummy" } else { "system device" },"checks":["native VLC playback", "seek", "pause", "repeat all", "repeat one", "scan", "cancellation", "search", "playlists", "atomic state"]}))?).await?;
     Ok(())
 }
 async fn wait(
@@ -312,7 +321,9 @@ pub async fn soak(api: Arc<Api>, report: PathBuf, seconds: u64) -> Result<()> {
         evidence["rapid_switches"] = 120.into();
         for _ in 0..20 {
             player.commands.send(Command::Toggle).await?;
-            wait(&player.state, |s| s.paused).await?;
+            wait(&player.state, |s| s.paused)
+                .await
+                .context("pause state")?;
             player.commands.send(Command::Toggle).await?;
             wait(&player.state, |s| !s.paused && s.active).await?;
         }

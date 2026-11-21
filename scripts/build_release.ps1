@@ -1,6 +1,6 @@
 # One-shot Windows packaging; the player itself never launches helper processes.
 [CmdletBinding()]
-param([ValidateRange(1, 32)][int]$BuildJobs = 2)
+param([ValidateRange(1, 32)][int]$BuildJobs = 2, [switch]$HeadlessAudio)
 $ErrorActionPreference = 'Stop'
 $rustRoot = Split-Path $PSScriptRoot -Parent
 $projectRoot = $rustRoot
@@ -64,7 +64,11 @@ try {
         $env:SHIYIN_VLC_DIR = Join-Path $bundle 'vlc'
         $env:PATH = Join-Path $env:SystemRoot 'System32'
         $errorLog = Join-Path $dist 'verification-stderr.txt'
-        $process = Start-Process -FilePath (Join-Path $bundle 'Shiyin.exe') -ArgumentList @('--self-test', ('"' + $report + '"')) -PassThru -WindowStyle Hidden -RedirectStandardError $errorLog
+        $testArguments = @('--self-test', ('"' + $report + '"'))
+        if ($HeadlessAudio) { $testArguments += '--headless' }
+        $process = Start-Process -FilePath (Join-Path $bundle 'Shiyin.exe') -ArgumentList $testArguments -PassThru -WindowStyle Hidden -RedirectStandardError $errorLog
+        # Retain the native handle so Windows PowerShell can read ExitCode after exit.
+        $null = $process.Handle
         if (-not $process.WaitForExit(60000)) { $process.Kill(); throw 'Packaged verification timed out' }
         if ($process.ExitCode -ne 0) {
             if (Test-Path -LiteralPath $errorLog) { Get-Content -LiteralPath $errorLog | Write-Host }

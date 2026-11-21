@@ -67,6 +67,10 @@ async fn logs(path: PathBuf, mut rx: tokio::sync::mpsc::Receiver<Option<Vec<u8>>
 }
 
 fn run() -> Result<()> {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    // Only the explicit native self-test may use a headless audio sink.
+    let headless_audio = arguments.first().is_some_and(|a| a == "--self-test")
+        && arguments.iter().any(|a| a == "--headless");
     let directory = vlc_directory()?;
     // Plugin discovery is configured before spawning any runtime or decoder threads.
     unsafe {
@@ -78,9 +82,9 @@ fn run() -> Result<()> {
         .thread_name("shiyin-io")
         .enable_all()
         .build()?;
-    let api = runtime
-        .block_on(async { tokio::task::spawn_blocking(move || Api::load(&directory)).await })??;
-    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let api = runtime.block_on(async {
+        tokio::task::spawn_blocking(move || Api::load(&directory, headless_audio)).await
+    })??;
     if arguments.first().is_some_and(|a| a == "--verify-import") {
         return runtime.block_on(diagnostics::verify_import(
             PathBuf::from(arguments.get(1).context("Missing source settings")?),
@@ -106,7 +110,7 @@ fn run() -> Result<()> {
                 .get(1)
                 .context("--self-test requires a report path")?,
         );
-        return runtime.block_on(diagnostics::run(api, report));
+        return runtime.block_on(diagnostics::run(api, report, headless_audio));
     }
     if arguments.first().is_some_and(|a| a == "--verify-library") {
         let source = PathBuf::from(arguments.get(1).context("Missing source settings")?);

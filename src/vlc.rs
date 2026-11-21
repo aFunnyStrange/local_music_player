@@ -9,14 +9,14 @@ type Handle = *mut c_void;
 
 macro_rules! api {
     ($($name:ident: $ty:ty),* $(,)?) => {
-        pub struct Api { _library: libloading::Library, $(pub $name: $ty,)* }
+        pub struct Api { _library: libloading::Library, headless_audio: bool, $(pub $name: $ty,)* }
         impl Api {
-            pub fn load(directory: &Path) -> Result<Arc<Self>> {
+            pub fn load(directory: &Path, headless_audio: bool) -> Result<Arc<Self>> {
                 // The library remains owned for longer than every copied function pointer.
                 let library: libloading::Library = unsafe {
                     libloading::os::windows::Library::load_with_flags(directory.join("libvlc.dll"), 0x100 | 0x1000)?
                 }.into();
-                unsafe { Ok(Arc::new(Self { $($name: *library.get(concat!(stringify!($name), "\0").as_bytes())?,)* _library: library })) }
+                unsafe { Ok(Arc::new(Self { $($name: *library.get(concat!(stringify!($name), "\0").as_bytes())?,)* _library: library, headless_audio })) }
             }
         }
     }
@@ -53,11 +53,14 @@ pub struct Backend {
 }
 impl Backend {
     pub fn new(api: Arc<Api>) -> Result<Self> {
-        let arguments = [
+        let mut arguments = vec![
             CString::new("--no-video")?,
             CString::new("--no-video-title-show")?,
             CString::new("--quiet")?,
         ];
+        if api.headless_audio {
+            arguments.push(CString::new("--aout=dummy")?);
+        }
         let args: Vec<_> = arguments.iter().map(|s| s.as_ptr()).collect();
         unsafe {
             let instance = (api.libvlc_new)(args.len() as c_int, args.as_ptr());

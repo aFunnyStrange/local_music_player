@@ -32,7 +32,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/verify_lifecycle
 
 以下参数可传给 `cargo run --locked --` 或解压后的 Shiyin.exe：
 
-- `--self-test report.json`：临时静音 WAV 播放、循环、定位、取消和退出。
+- `--self-test report.json`：临时静音 WAV 播放、循环、定位、取消和退出。无声卡 CI 可追加 `--headless`，显式使用 VLC dummy 输出；正常播放器不受影响。`scripts/build_release.ps1 -HeadlessAudio` 使用此模式，报告会标明音频输出类型。
 - `--ui-self-test report.json`：临时数据验证窗口、搜索、双歌单、语言、托盘恢复与退出保存。
 - `--verify-library library.json report.json`：只读扫描曲库，每种格式抽样静音播放、暂停、定位。
 - `--verify-import library.json report.json`：临时目录验证配置导入、备份和全字段往返一致。

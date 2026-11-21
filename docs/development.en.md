@@ -32,7 +32,7 @@ Packaging uses target/package. Exit dist/Shiyin/Shiyin.exe before rebuilding its
 
 Pass these arguments to `cargo run --locked --` or the packaged executable:
 
-- `--self-test report.json`: temporary silent WAV playback, looping, seek, cancellation and exit.
+- `--self-test report.json`: temporary silent WAV playback, looping, seek, cancellation and exit. Append `--headless` on CI without an audio device to explicitly use VLC dummy output. `scripts/build_release.ps1 -HeadlessAudio` selects this mode and reports the audio-output type; normal playback is unaffected.
 - `--ui-self-test report.json`: temporary window, search, playlists, language, tray restoration and exit state.
 - `--verify-library library.json report.json`: read-only scan and one muted playback/pause/seek sample per discovered format.
 - `--verify-import library.json report.json`: temporary import, backup and full-state roundtrip.
