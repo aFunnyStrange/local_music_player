@@ -41,7 +41,7 @@ Rust is the default. Checked items represent implementation, not universal compa
 - [x] 源码版和已安装 Python 版配置在临时目录导入逐字段一致；有内容的歌单、收藏、名称另用测试曲库验证 / Source and installed Python state round-trip unchanged in temporary storage; nonempty playlists, favorites and names verified with fixtures.
 - [x] 发布时携带依赖许可、VLC 和 Cargo 依赖源码材料及来源校验清单 / Ship dependency notices, VLC and Cargo source materials with provenance and checksums.
 - [x] 主项目结构与默认入口切换，见[切换记录](cutover-2026-11-21.md) / Promote main project and default entry; see cutover record.
-- [ ] 公开发布 Release（独立于本机切换） / Publish a public Release (separate from local cutover).
+- [x] 公开发布 [v0.3.0](https://github.com/aFunnyStrange/local_music_player/releases/tag/v0.3.0)，附完整 Windows x64 包、SHA-256、自检报告与第三方源码 / Published v0.3.0 with the complete Windows bundle, checksums, native verification report and third-party sources.
 
 ## 运行约束 / Runtime boundaries
 
