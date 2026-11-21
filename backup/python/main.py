@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import sys
+import argparse
+from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
 import settings
@@ -20,6 +22,13 @@ def configure_logging() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Shiyin local music player")
+    parser.add_argument("--self-test", type=Path, metavar="REPORT", help="test with temporary music and write a JSON report")
+    arguments = parser.parse_args()
     configure_logging()
-    asyncio.run(main())
+    if arguments.self_test:
+        from player.diagnostics import run
+        asyncio.run(run(arguments.self_test))
+    else:
+        asyncio.run(main())
 

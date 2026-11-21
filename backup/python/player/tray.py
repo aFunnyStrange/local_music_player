@@ -14,6 +14,7 @@ class WindowsTray:
         self.events: deque[str] = deque(maxlen=16)
         self.visible = False
         self.closed = False
+        self.tooltip = "Shiyin"
         self.callback_message = win32con.WM_APP + 10
         self.taskbar_created = win32gui.RegisterWindowMessage("TaskbarCreated")
         self.instance = win32api.GetModuleHandle(None)
@@ -61,8 +62,16 @@ class WindowsTray:
             flags = win32gui.NIF_ICON | win32gui.NIF_MESSAGE | win32gui.NIF_TIP
             win32gui.Shell_NotifyIcon(win32gui.NIM_ADD,
                                      (self.hwnd, 1, flags, self.callback_message, self.icon,
-                                      "拾音 · 单击恢复，右键打开菜单"))
+                                      self.tooltip))
             self.visible = True
+
+    def set_tooltip(self, text: str) -> None:
+        """Update translated tooltip without replacing the notification icon."""
+        self.tooltip = text
+        if self.visible:
+            win32gui.Shell_NotifyIcon(win32gui.NIM_MODIFY,
+                                     (self.hwnd, 1, win32gui.NIF_TIP, self.callback_message,
+                                      self.icon, self.tooltip))
 
     def hide(self) -> None:
         """Remove the icon after restoration or during final shutdown."""

@@ -12,6 +12,7 @@ from mutagen import File, MutagenError
 
 from .metadata import resolve_metadata
 from .search import compile_query, matches
+from .playlists import DEFAULT_PLAYLIST, validate_playlists
 
 log = logging.getLogger(__name__)
 
@@ -107,8 +108,9 @@ async def scan_library(roots: list[str], extensions: frozenset, batch_size: int,
 
 def default_state(root: Path) -> dict:
     """Provide a versioned local library with no dependency on the legacy project."""
-    return {"version": 1, "roots": [str(root)], "favorites": [], "names": {},
-            "volume": 60, "mode": "列表循环", "close_action": "ask"}
+    return {"version": 2, "roots": [str(root)], "favorites": [], "names": {},
+            "volume": 60, "mode": "列表循环", "close_action": "ask",
+            "language": "zh_CN", "playlists": {}, "selected_playlist": DEFAULT_PLAYLIST}
 
 
 def load_state(path: Path, root: Path) -> dict:
@@ -117,7 +119,7 @@ def load_state(path: Path, root: Path) -> dict:
     if not path.exists():
         return state
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or raw.get("version") != 1:
+    if not isinstance(raw, dict) or raw.get("version") not in (1, 2):
         raise ValueError("音乐库配置版本不受支持")
     for key in ("roots", "favorites"):
         if not isinstance(raw.get(key), list) or not all(isinstance(v, str) for v in raw[key]):
@@ -135,6 +137,12 @@ def load_state(path: Path, root: Path) -> dict:
     if raw.get("close_action", "ask") not in ("ask", "tray", "exit"):
         raise ValueError("关闭行为配置无效")
     state.update(raw)
+    state["version"] = 2
+    if state["language"] not in ("zh_CN", "en"):
+        raise ValueError("Invalid language preference")
+    validate_playlists(state["playlists"])
+    if state["selected_playlist"] != DEFAULT_PLAYLIST and state["selected_playlist"] not in state["playlists"]:
+        state["selected_playlist"] = DEFAULT_PLAYLIST
     return state
 
 

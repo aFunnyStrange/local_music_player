@@ -1,5 +1,6 @@
 """Run Tk and asyncio on the main thread with bounded blocking I/O workers."""
 import asyncio
+import copy
 import logging
 import sys
 import tkinter as tk
@@ -12,6 +13,8 @@ import settings
 from .library import Track, load_state, path_key, save_state, scan_library, visible_tracks
 from .playback import MODES, Playback, VlcBackend
 from .tray import WindowsTray
+from .playlists import DEFAULT_PLAYLIST, name_playlist, set_memberships
+from .i18n import translate, translate_note
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +42,8 @@ class Application:
                  state_file: Path = settings.STATE_FILE) -> None:
         """Build a single resizable window and retain explicit runtime ownership."""
         self.root, self.state, self.playback = root, state, playback
+        self.language = state.get("language", "zh_CN")
+        self.playlist_dialog: Optional[tk.Toplevel] = None
         self.state_file = state_file
         self.tracks: list[Track] = []
         self.visible: list[Track] = []
@@ -59,29 +64,65 @@ class Application:
         self.favorites = set(state["favorites"])
         self.query = tk.StringVar()
         self.only_favorites = tk.BooleanVar()
-        self.status = tk.StringVar(value="添加音乐文件夹，或把文件放入 library 目录")
-        self.now = tk.StringVar(value="还没有播放歌曲")
+        self.status = tk.StringVar(value=self.tr('添加音乐文件夹，或把文件放入 library 目录'))
+        self.now = tk.StringVar(value=self.tr('还没有播放歌曲'))
         self.time_text = tk.StringVar(value="00:00 / 00:00")
-        self.mode = tk.StringVar(value=state["mode"])
+        self.mode = tk.StringVar(value=self.tr(state["mode"]))
+        self.playlist_choice = tk.StringVar()
         self.volume = tk.DoubleVar(value=state["volume"])
         self.progress = tk.DoubleVar()
         self.dragging = False
         self.seek_track: Optional[Track] = None
         playback.mode, playback.volume = state["mode"], int(state["volume"])
         self._build()
+        self.query.trace_add("write", self.search_changed)
         self.root.protocol("WM_DELETE_WINDOW", self.on_window_close)
         self.tray_menu = tk.Menu(root, tearoff=False)
-        self.tray_menu.add_command(label="打开播放器", command=self.restore_window)
-        self.tray_menu.add_command(label="播放 / 暂停", command=self.toggle_play)
-        self.tray_menu.add_command(label="上一首", command=lambda: self.launch(self.playback.skip(-1)))
-        self.tray_menu.add_command(label="下一首", command=lambda: self.launch(self.playback.skip(1)))
+        self.tray_menu.add_command(label=self.tr('打开播放器'), command=self.restore_window)
+        self.tray_menu.add_command(label=self.tr('播放 / 暂停'), command=self.toggle_play)
+        self.tray_menu.add_command(label=self.tr('上一首'), command=lambda: self.launch(self.playback.skip(-1)))
+        self.tray_menu.add_command(label=self.tr('下一首'), command=lambda: self.launch(self.playback.skip(1)))
         self.tray_menu.add_separator()
-        self.tray_menu.add_command(label="退出播放器", command=self.request_close)
+        self.tray_menu.add_command(label=self.tr('退出播放器'), command=self.request_close)
+
+    def tr(self, text: str, **values) -> str:
+        """Translate UI messages without translating user-owned song or playlist names."""
+        return translate(self.language, text, **values)
+
+    def switch_language(self) -> None:
+        """Rebuild labels on the owner thread without restarting playback or scanning."""
+        selection = self.tree.selection()
+        if self.render_task:
+            self.render_task.cancel()
+        for child in self.root.winfo_children():
+            if isinstance(child, tk.Toplevel):
+                child.destroy()
+        self.close_dialog = self.playlist_dialog = self.tray_popup = None
+        self.language = "en" if self.language == "zh_CN" else "zh_CN"
+        self.state["language"] = self.language
+        self.main_frame.destroy()
+        self.mode.set(self.tr(self.playback.mode))
+        self._build()
+        for index, label in ((0, self.tr('打开播放器')), (2, self.tr('上一首')), (3, self.tr('下一首')), (5, self.tr('退出播放器'))):
+            self.tray_menu.entryconfigure(index, label=self.tr(label))
+        self.update_tray_menu()
+        if self.tray:
+            self.tray.set_tooltip(self.tr("拾音 · 单击恢复，右键打开菜单"))
+        if self.playback.current is None:
+            self.now.set(self.tr("还没有播放歌曲"))
+        self.render_task = self.launch(self.render_after_language_change(selection))
+        self.schedule_save()
+
+    async def render_after_language_change(self, selection: tuple) -> None:
+        """Restore row identity after translating the table headings."""
+        await self.render_rows()
+        if selection and self.tree.exists(selection[0]):
+            self.tree.selection_set(selection[0])
 
     def _build(self) -> None:
         """Compose a searchable library, real scrollbars and stable playback controls."""
         root = self.root
-        root.title("拾音 · 本地音乐播放器")
+        root.title(self.tr('拾音 · 本地音乐播放器'))
         if settings.ICON_FILE.is_file():
             root.iconbitmap(str(settings.ICON_FILE))
         root.geometry("1100x720")
@@ -89,31 +130,42 @@ class Application:
         style = ttk.Style(root)
         style.configure("Treeview", rowheight=29)
         style.configure("TButton", padding=(10, 6))
-        frame = ttk.Frame(root, padding=16)
+        frame = self.main_frame = ttk.Frame(root, padding=16)
         frame.pack(fill="both", expand=True)
         toolbar = ttk.Frame(frame)
         toolbar.pack(fill="x", pady=(0, 12))
-        ttk.Label(toolbar, text="拾音", font=("Microsoft YaHei UI", 20, "bold")).pack(side="left", padx=(0, 24))
-        ttk.Button(toolbar, text="添加文件夹", command=self.add_folder).pack(side="left")
-        ttk.Button(toolbar, text="管理目录", command=self.manage_folders).pack(side="left", padx=6)
-        ttk.Button(toolbar, text="刷新", command=self.refresh).pack(side="left")
-        ttk.Button(toolbar, text="取消扫描", command=self.cancel_scan).pack(side="left", padx=6)
-        ttk.Checkbutton(toolbar, text="只看收藏", variable=self.only_favorites,
+        ttk.Button(toolbar, text="English" if self.language == "zh_CN" else "简体中文",
+                   command=self.switch_language).pack(side="right", padx=6)
+        ttk.Label(toolbar, text=self.tr('拾音'), font=("Microsoft YaHei UI", 20, "bold")).pack(side="left", padx=(0, 24))
+        ttk.Button(toolbar, text=self.tr('添加文件夹'), command=self.add_folder).pack(side="left")
+        ttk.Button(toolbar, text=self.tr('管理目录'), command=self.manage_folders).pack(side="left", padx=6)
+        ttk.Button(toolbar, text=self.tr('刷新'), command=self.refresh).pack(side="left")
+        ttk.Button(toolbar, text=self.tr('取消扫描'), command=self.cancel_scan).pack(side="left", padx=6)
+        ttk.Checkbutton(toolbar, text=self.tr('只看收藏'), variable=self.only_favorites,
                         command=self.render).pack(side="right")
         search = ttk.Frame(frame)
         search.pack(fill="x", pady=(0, 4))
-        ttk.Label(search, text="搜索歌曲 / 歌手 / 专辑 / 文件名").pack(side="left", padx=(0, 12))
+        ttk.Label(search, text=self.tr('搜索歌曲 / 歌手 / 专辑 / 文件名')).pack(side="left", padx=(0, 12))
         self.search_entry = ttk.Entry(search, textvariable=self.query)
         self.search_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(search, text="清空", command=lambda: self.query.set("")).pack(side="left", padx=(8, 0))
-        self.query.trace_add("write", self.search_changed)
-        ttk.Label(frame, text='空格：同时匹配   "Love Theme"：完整短语   !live：排除   周杰伦 | 林俊杰：任选其一   *.flac：格式',
+        ttk.Button(search, text=self.tr('清空'), command=lambda: self.query.set("")).pack(side="left", padx=(8, 0))
+        ttk.Label(frame, text=self.tr('空格：同时匹配   "Love Theme"：完整短语   !live：排除   周杰伦 | 林俊杰：任选其一   *.flac：格式'),
                   wraplength=1000).pack(anchor="w", pady=(0, 8))
+        playlist_bar = ttk.Frame(frame)
+        playlist_bar.pack(fill="x", pady=(0, 8))
+        ttk.Label(playlist_bar, text=self.tr('歌单')).pack(side="left", padx=(0, 8))
+        self.playlist_combo = ttk.Combobox(playlist_bar, textvariable=self.playlist_choice,
+                                         state="readonly", width=30)
+        self.playlist_combo.pack(side="left")
+        self.playlist_combo.bind("<<ComboboxSelected>>", self.select_playlist)
+        self.update_playlist_choices()
+        ttk.Button(playlist_bar, text=self.tr('管理歌单'), command=self.manage_playlists).pack(side="left", padx=6)
+        ttk.Button(playlist_bar, text=self.tr('加入 / 移出歌单'), command=self.edit_memberships).pack(side="left")
         body = ttk.Frame(frame)
         body.pack(fill="both", expand=True)
         columns = ("favorite", "title", "artist", "album", "duration", "file")
         self.tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="browse")
-        for column, label, width in zip(columns, ("收藏", "歌曲", "歌手", "专辑", "时长", "原文件名"),
+        for column, label, width in zip(columns, (self.tr('收藏'), self.tr('歌曲'), self.tr('歌手'), self.tr('专辑'), self.tr('时长'), self.tr('原文件名')),
                                          (50, 260, 140, 150, 65, 260)):
             self.tree.heading(column, text=label)
             self.tree.column(column, width=width, minwidth=40, stretch=column not in ("favorite", "duration"))
@@ -129,10 +181,10 @@ class Application:
         self.tree.bind("<Return>", self.play_selected)
         actions = ttk.Frame(frame)
         actions.pack(fill="x", pady=8)
-        ttk.Button(actions, text="收藏 / 取消收藏", command=self.toggle_favorite).pack(side="left")
-        ttk.Button(actions, text="修改显示名称", command=self.rename_display).pack(side="left", padx=6)
-        ttk.Button(actions, text="文件信息", command=self.file_info).pack(side="left")
-        ttk.Button(actions, text="关闭设置", command=lambda: self.show_close_dialog(True)).pack(side="right")
+        ttk.Button(actions, text=self.tr('收藏 / 取消收藏'), command=self.toggle_favorite).pack(side="left")
+        ttk.Button(actions, text=self.tr('修改显示名称'), command=self.rename_display).pack(side="left", padx=6)
+        ttk.Button(actions, text=self.tr('文件信息'), command=self.file_info).pack(side="left")
+        ttk.Button(actions, text=self.tr('关闭设置'), command=lambda: self.show_close_dialog(True)).pack(side="right")
         ttk.Label(frame, textvariable=self.now, font=("Microsoft YaHei UI", 12)).pack(anchor="w", pady=(8, 4))
         timeline = ttk.Frame(frame)
         timeline.pack(fill="x")
@@ -145,11 +197,12 @@ class Application:
         ttk.Label(timeline, textvariable=self.time_text, width=17, anchor="e").pack(side="right")
         controls = ttk.Frame(frame)
         controls.pack(fill="x", pady=8)
-        ttk.Button(controls, text="上一首", command=lambda: self.launch(self.playback.skip(-1))).pack(side="left")
-        self.pause_button = ttk.Button(controls, text="播放", command=self.toggle_play)
+        ttk.Button(controls, text=self.tr('上一首'), command=lambda: self.launch(self.playback.skip(-1))).pack(side="left")
+        self.pause_button = ttk.Button(controls, text=self.tr('播放'), command=self.toggle_play)
         self.pause_button.pack(side="left", padx=6)
-        ttk.Button(controls, text="下一首", command=lambda: self.launch(self.playback.skip(1))).pack(side="left")
-        modes = ttk.Combobox(controls, values=MODES, state="readonly", textvariable=self.mode, width=12)
+        ttk.Button(controls, text=self.tr('下一首'), command=lambda: self.launch(self.playback.skip(1))).pack(side="left")
+        modes = ttk.Combobox(controls, values=[self.tr(mode) for mode in MODES],
+                             state="readonly", textvariable=self.mode, width=14)
         modes.pack(side="left", padx=12)
         modes.bind("<<ComboboxSelected>>", self.change_mode)
         self.volume_slider = ttk.Scale(controls, from_=0, to=100, variable=self.volume)
@@ -158,10 +211,129 @@ class Application:
         self.volume_slider.bind("<B1-Motion>", set_scale_from_pointer)
         self.volume_slider.bind("<ButtonRelease-1>", self.end_volume)
         self.volume_slider.bind("<KeyRelease>", self.change_volume)
-        ttk.Label(controls, text="音量").pack(side="right", padx=8)
+        ttk.Label(controls, text=self.tr('音量')).pack(side="right", padx=8)
         ttk.Label(frame, textvariable=self.status, wraplength=1000).pack(anchor="w")
         root.bind("<Control-f>", self.focus_search)
         root.bind("<space>", self.space_play)
+
+    def update_playlist_choices(self) -> None:
+        """Map combo positions to stable IDs so renaming cannot break selection."""
+        self.playlist_ids = [DEFAULT_PLAYLIST, *self.state["playlists"]]
+        labels = [self.tr("默认歌单 · 全部音乐")]
+        labels.extend(item["name"] for item in self.state["playlists"].values())
+        self.playlist_combo.configure(values=labels)
+        self.playlist_combo.current(self.playlist_ids.index(self.state["selected_playlist"]))
+
+    def select_playlist(self, event=None) -> None:
+        """Filter only the browsing view; keep the captured playback queue stable."""
+        index = self.playlist_combo.current()
+        if index >= 0:
+            self.state["selected_playlist"] = self.playlist_ids[index]
+            self.schedule_save()
+            self.render()
+
+    def manage_playlists(self) -> None:
+        """Create, rename or remove collections in a nonblocking editor."""
+        if self.playlist_dialog and self.playlist_dialog.winfo_exists():
+            self.playlist_dialog.lift()
+            return
+        dialog = self.playlist_dialog = tk.Toplevel(self.root)
+        dialog.title(self.tr('管理歌单'))
+        dialog.geometry("540x380")
+        body = ttk.Frame(dialog, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=self.tr('默认歌单自动包含全部音乐；删除自建歌单不会删除文件。'),
+                  wraplength=500).pack(anchor="w")
+        listing = tk.Listbox(body, exportselection=False)
+        listing.pack(fill="both", expand=True, pady=8)
+        name = tk.StringVar()
+        ttk.Entry(body, textvariable=name).pack(fill="x")
+        notice = tk.StringVar()
+        ttk.Label(body, textvariable=notice, wraplength=500).pack(anchor="w")
+        identities = []
+
+        def redraw() -> None:
+            """Refresh the editor and active selector after an accepted mutation."""
+            identities[:] = list(self.state["playlists"])
+            listing.delete(0, "end")
+            for identity in identities:
+                listing.insert("end", self.state["playlists"][identity]["name"])
+            self.update_playlist_choices()
+
+        def select(event=None) -> None:
+            """Populate the editable name without changing playlist membership."""
+            if listing.curselection():
+                name.set(self.state["playlists"][identities[listing.curselection()[0]]]["name"])
+
+        def change(action: str) -> None:
+            """Apply a validated name or delete only a playlist reference."""
+            identity = identities[listing.curselection()[0]] if listing.curselection() else ""
+            if action != "create" and not identity:
+                return
+            try:
+                if action == "delete":
+                    del self.state["playlists"][identity]
+                    if self.state["selected_playlist"] == identity:
+                        self.state["selected_playlist"] = DEFAULT_PLAYLIST
+                else:
+                    identity = name_playlist(self.state["playlists"], name.get(),
+                                             identity if action == "rename" else "")
+                    self.state["selected_playlist"] = identity
+            except ValueError as exc:
+                notice.set(self.tr(str(exc)))
+                return
+            notice.set("")
+            name.set("")
+            redraw()
+            self.schedule_save()
+            self.render()
+
+        listing.bind("<<ListboxSelect>>", select)
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=8)
+        for label, action in ((self.tr('创建'), "create"), (self.tr('重命名'), "rename"), (self.tr('删除歌单'), "delete")):
+            ttk.Button(buttons, text=self.tr(label), command=lambda action=action: change(action)).pack(side="left", padx=4)
+        redraw()
+
+    def edit_memberships(self) -> None:
+        """Save one track to any number of playlists using a multi-select checklist."""
+        track = self.selected()
+        if not track:
+            return
+        if self.playlist_dialog and self.playlist_dialog.winfo_exists():
+            self.playlist_dialog.lift()
+            return
+        dialog = self.playlist_dialog = tk.Toplevel(self.root)
+        dialog.title(self.tr('加入 / 移出歌单'))
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=self.state["names"].get(track.path, track.title), wraplength=450).pack(anchor="w")
+        ttk.Label(body, text=self.tr('点击切换选中状态；保存后同时更新多个歌单。'), wraplength=450).pack(anchor="w", pady=8)
+        identities = list(self.state["playlists"])
+        listing = tk.Listbox(body, selectmode="multiple", exportselection=False, width=48, height=12)
+        listing.pack(side="top", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(body, orient="horizontal", command=listing.xview)
+        scrollbar.pack(fill="x")
+        listing.configure(xscrollcommand=scrollbar.set)
+        for index, identity in enumerate(identities):
+            playlist = self.state["playlists"][identity]
+            listing.insert("end", playlist["name"])
+            if track.path in playlist["tracks"]:
+                listing.selection_set(index)
+        if not identities:
+            ttk.Label(body, text=self.tr('请先在管理歌单中创建歌单。'), wraplength=450).pack(anchor="w")
+
+        def save_memberships() -> None:
+            """Commit all toggles together and leave the audio and playback untouched."""
+            selected = {identities[index] for index in listing.curselection()}
+            set_memberships(self.state["playlists"], track.path, selected)
+            self.schedule_save()
+            self.render()
+            dialog.destroy()
+            self.playlist_dialog = None
+
+        ttk.Button(body, text=self.tr('保存'), command=save_memberships).pack(side="right", pady=8)
+        ttk.Button(body, text=self.tr('取消'), command=dialog.destroy).pack(side="right", padx=8)
 
     def launch(self, coroutine: Coroutine) -> Optional[asyncio.Task]:
         """Retain a bounded number of commands and consume every task exception."""
@@ -182,7 +354,7 @@ class Application:
         if error:
             log.error("Background task failed", exc_info=(type(error), error, error.__traceback__))
             if not self.closing:
-                self.status.set(f"操作失败：{error}")
+                self.status.set(self.tr('操作失败：{p0}', p0=self.tr(str(error))))
 
     def selected(self) -> Optional[Track]:
         """Resolve a row by file identity, independent of sorting and filtering."""
@@ -230,7 +402,10 @@ class Application:
     async def render_rows(self) -> None:
         """Yield between row batches so a large library keeps accepting UI events."""
         selection = self.tree.selection()
-        self.visible = visible_tracks(self.tracks, self.query.get(), self.favorites,
+        identity = self.state["selected_playlist"]
+        paths = None if identity == DEFAULT_PLAYLIST else set(self.state["playlists"][identity]["tracks"])
+        tracks = self.tracks if paths is None else [track for track in self.tracks if track.path in paths]
+        self.visible = visible_tracks(tracks, self.query.get(), self.favorites,
                                       self.state["names"], self.only_favorites.get())
         children = self.tree.get_children()
         for offset in range(0, len(children), 200):
@@ -245,13 +420,13 @@ class Application:
                 await asyncio.sleep(0)
         if selection and self.tree.exists(selection[0]):
             self.tree.selection_set(selection[0])
-        self.status.set(f"显示 {len(self.visible)} / {len(self.tracks)} 首"
-                        + (f"；有 {len(self.scan_errors)} 个目录读取失败" if self.scan_errors else ""))
+        self.status.set(self.tr('显示 {p0} / {p1} 首', p0=len(self.visible), p1=len(self.tracks))
+                        + (self.tr('；有 {p0} 个目录读取失败', p0=len(self.scan_errors)) if self.scan_errors else ""))
 
     def refresh(self) -> None:
         """Keep at most one library scan active."""
         if self.scan_task and not self.scan_task.done():
-            self.status.set("正在扫描；可点击取消扫描")
+            self.status.set(self.tr('正在扫描；可点击取消扫描'))
             return
         self.scan_task = self.launch(self.scan())
 
@@ -262,13 +437,13 @@ class Application:
             async for batch in scan_library(list(self.state["roots"]), settings.AUDIO_EXTENSIONS,
                                             settings.SCAN_BATCH_SIZE, errors):
                 found.update((track.path, track) for track in batch)
-                self.status.set(f"正在读取音乐信息：{len(found)} 首")
+                self.status.set(self.tr('正在读取音乐信息：{p0} 首', p0=len(found)))
             self.tracks = list(found.values())
             self.scan_errors = errors
             self.render()
         except asyncio.CancelledError:
             if not self.closing:
-                self.status.set("扫描已取消，保留上次列表")
+                self.status.set(self.tr('扫描已取消，保留上次列表'))
             raise
 
     def cancel_scan(self) -> None:
@@ -278,7 +453,7 @@ class Application:
 
     def add_folder(self) -> None:
         """Index an external directory without copying or moving its files."""
-        folder = filedialog.askdirectory(parent=self.root, title="选择音乐文件夹（不会移动文件）")
+        folder = filedialog.askdirectory(parent=self.root, title=self.tr('选择音乐文件夹（不会移动文件）'))
         if folder:
             self.launch(self.add_root(folder))
 
@@ -296,7 +471,7 @@ class Application:
     def manage_folders(self) -> None:
         """Remove indexing roots without deleting any user audio."""
         dialog = tk.Toplevel(self.root)
-        dialog.title("音乐目录（移除目录不会删除音乐）")
+        dialog.title(self.tr('音乐目录（移除目录不会删除音乐）'))
         dialog.geometry("700x300")
         listing = tk.Listbox(dialog, exportselection=False)
         listing.pack(fill="both", expand=True, padx=12, pady=12)
@@ -313,7 +488,7 @@ class Application:
                 self.schedule_save()
                 self.launch(self.rescan())
 
-        ttk.Button(dialog, text="移除选中目录", command=remove).pack(pady=(0, 12))
+        ttk.Button(dialog, text=self.tr('移除选中目录'), command=remove).pack(pady=(0, 12))
 
     async def rescan(self) -> None:
         """Restart a scan after directory configuration changes."""
@@ -335,7 +510,7 @@ class Application:
         track = self.selected()
         if not track:
             return
-        name = simpledialog.askstring("显示名称", "只修改本播放器中的名称；留空恢复自动识别：",
+        name = simpledialog.askstring(self.tr('显示名称'), self.tr('只修改本播放器中的名称；留空恢复自动识别：'),
                                       initialvalue=self.state["names"].get(track.path, track.title), parent=self.root)
         if name is not None:
             if name.strip():
@@ -349,14 +524,12 @@ class Application:
         """Show source identity and metadata without modifying the audio."""
         track = self.selected()
         if track:
-            messagebox.showinfo("音乐文件", f"{track.path}\n\n显示标题：{track.title}\n歌手：{track.artist}\n专辑：{track.album}"
-                                f"\n\n识别依据\n{track.display_note}"
-                                f"\n\n原始标签（未修改）\n标题：{track.raw_title}\n歌手：{track.raw_artist}\n专辑：{track.raw_album}",
+            messagebox.showinfo(self.tr('音乐文件'), self.tr('{p0}\n\n显示标题：{p1}\n歌手：{p2}\n专辑：{p3}\n\n识别依据\n{p4}\n\n原始标签（未修改）\n标题：{p5}\n歌手：{p6}\n专辑：{p7}', p0=track.path, p1=track.title, p2=track.artist, p3=track.album, p4=translate_note(self.language, track.display_note), p5=track.raw_title, p6=track.raw_artist, p7=track.raw_album),
                                 parent=self.root)
 
     def change_mode(self, event=None) -> None:
         """Apply mode changes to the next transition without restarting playback."""
-        self.playback.mode = self.mode.get()
+        self.playback.mode = next((mode for mode in MODES if self.tr(mode) == self.mode.get()), MODES[0])
         self.schedule_save()
 
     def change_volume(self, event=None) -> None:
@@ -396,9 +569,9 @@ class Application:
 
     def snapshot_state(self) -> dict:
         """Create a detached snapshot so worker writes cannot race with UI edits."""
-        return {**self.state, "roots": list(self.state["roots"]),
+        return {**copy.deepcopy(self.state), "roots": list(self.state["roots"]),
                 "favorites": sorted(self.favorites), "names": dict(self.state["names"]),
-                "volume": round(self.volume.get()), "mode": self.mode.get()}
+                "volume": round(self.volume.get()), "mode": self.playback.mode}
 
     def schedule_save(self) -> None:
         """Coalesce edits into one delayed writer; closing performs a final flush."""
@@ -425,10 +598,10 @@ class Application:
                 await self.playback.tick()
             except Exception as exc:
                 log.exception("Playback monitor failed")
-                self.status.set(f"播放失败：{exc}")
+                self.status.set(self.tr('播放失败：{p0}', p0=self.tr(str(exc))))
             track = self.playback.current
             if track:
-                prefix = "已暂停" if self.playback.paused else ("正在播放" if self.playback.active else "已停止")
+                prefix = self.tr('已暂停') if self.playback.paused else (self.tr('正在播放') if self.playback.active else self.tr('已停止'))
                 self.now.set(f"{prefix} · {self.state['names'].get(track.path, track.title)}  {track.artist}")
             self.pause_button.configure(text=self.transport_label())
             self.slider.configure(to=max(1, self.playback.duration))
@@ -456,21 +629,21 @@ class Application:
             self.close_dialog.lift()
             return
         dialog = self.close_dialog = tk.Toplevel(self.root)
-        dialog.title("关闭设置" if settings_only else "关闭播放器")
+        dialog.title(self.tr('关闭设置') if settings_only else self.tr('关闭播放器'))
         dialog.transient(self.root)
         dialog.resizable(False, False)
         body = ttk.Frame(dialog, padding=20)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="点击右上角 X 时：" if settings_only else "你希望如何关闭播放器？").pack(anchor="w", pady=(0, 12))
+        ttk.Label(body, text=self.tr('点击右上角 X 时：') if settings_only else self.tr('你希望如何关闭播放器？')).pack(anchor="w", pady=(0, 12))
         initial = self.state.get("close_action", "ask")
         action = tk.StringVar(value=initial if settings_only or initial != "ask" else "tray")
         remember = tk.BooleanVar(value=False)
         if settings_only:
-            ttk.Radiobutton(body, text="每次询问", value="ask", variable=action).pack(anchor="w", pady=4)
-        ttk.Radiobutton(body, text="最小化到系统托盘，继续播放", value="tray", variable=action).pack(anchor="w", pady=4)
-        ttk.Radiobutton(body, text="退出播放器，停止播放", value="exit", variable=action).pack(anchor="w", pady=4)
+            ttk.Radiobutton(body, text=self.tr('每次询问'), value="ask", variable=action).pack(anchor="w", pady=4)
+        ttk.Radiobutton(body, text=self.tr('最小化到系统托盘，继续播放'), value="tray", variable=action).pack(anchor="w", pady=4)
+        ttk.Radiobutton(body, text=self.tr('退出播放器，停止播放'), value="exit", variable=action).pack(anchor="w", pady=4)
         if not settings_only:
-            ttk.Checkbutton(body, text="记住选择（可在关闭设置中修改）", variable=remember).pack(anchor="w", pady=12)
+            ttk.Checkbutton(body, text=self.tr('记住选择（可在关闭设置中修改）'), variable=remember).pack(anchor="w", pady=12)
 
         def dismiss() -> None:
             """Cancel without changing playback or persisted preferences."""
@@ -490,8 +663,8 @@ class Application:
 
         buttons = ttk.Frame(body)
         buttons.pack(fill="x", pady=(12, 0))
-        ttk.Button(buttons, text="取消", command=dismiss).pack(side="right")
-        ttk.Button(buttons, text="保存" if settings_only else "确定", command=confirm).pack(side="right", padx=8)
+        ttk.Button(buttons, text=self.tr('取消'), command=dismiss).pack(side="right")
+        ttk.Button(buttons, text=self.tr('保存') if settings_only else self.tr('确定'), command=confirm).pack(side="right", padx=8)
         dialog.protocol("WM_DELETE_WINDOW", dismiss)
         dialog.bind("<Escape>", lambda event: dismiss())
         dialog.grab_set()
@@ -513,10 +686,11 @@ class Application:
         try:
             if self.tray is None:
                 self.tray = WindowsTray()
+            self.tray.set_tooltip(self.tr("拾音 · 单击恢复，右键打开菜单"))
             self.tray.show()
         except Exception as exc:
             log.exception("Cannot create notification icon")
-            messagebox.showerror("无法最小化到托盘", f"{exc}\n窗口将保持打开，你仍可选择退出。", parent=self.root)
+            messagebox.showerror(self.tr('无法最小化到托盘'), self.tr('{p0}\n窗口将保持打开，你仍可选择退出。', p0=exc), parent=self.root)
             return False
         if not self.hidden_to_tray:
             self.hidden_children = [child for child in self.root.winfo_children()
@@ -557,7 +731,7 @@ class Application:
                 except Exception:
                     log.exception("Cannot restore tray after Explorer restart")
                     self.restore_window()
-                    self.status.set("系统托盘恢复失败，已重新显示播放器")
+                    self.status.set(self.tr('系统托盘恢复失败，已重新显示播放器'))
 
     def update_tray_menu(self) -> None:
         """Describe the current transport state when opening the tray menu."""
@@ -570,7 +744,7 @@ class Application:
 
     def transport_label(self) -> str:
         """Use one consistent play/pause/resume action in both surfaces."""
-        return "继续" if self.playback.paused else ("暂停" if self.playback.active else "播放")
+        return self.tr('继续') if self.playback.paused else (self.tr('暂停') if self.playback.active else self.tr('播放'))
 
     def dismiss_tray_menu(self) -> None:
         """Close the nonmodal popup without affecting the hidden player."""
@@ -649,7 +823,7 @@ class Application:
             except Exception as exc:
                 log.exception("Cannot save library")
                 self.root.deiconify()
-                messagebox.showerror("配置保存失败", str(exc), parent=self.root)
+                messagebox.showerror(self.tr('配置保存失败'), str(exc), parent=self.root)
             finally:
                 try:
                     await self.playback.close()
@@ -673,9 +847,11 @@ async def main() -> None:
         backend = await asyncio.to_thread(VlcBackend, settings.VLC_DIR)
     except Exception as exc:
         log.exception("Player initialization failed")
-        messagebox.showerror("播放器启动失败",
-                            f"{exc}\n\n请安装 requirements.txt 中的依赖及同架构 VLC 3，"
-                            "或将便携 VLC 放入 .runtime/vlc-3.0.21。配置损坏时请先备份 data/library.json。",
+        messagebox.showerror("启动失败 / Startup failed",
+                            f"{exc}\n\n配置 / Settings: {settings.STATE_FILE}\n"
+                            "发布包请完整解压后重试；源码请参考开发文档。\n"
+                            "Extract the entire release archive, or follow the source setup guide.\n"
+                            "配置损坏时请先备份文件。Back up settings before repairing them.",
                             parent=root)
         root.destroy()
         return

@@ -4,4 +4,7 @@ __pycache__/
 data/
 library/*
 !library/.gitkeep
+build/
+dist/
+target/
 

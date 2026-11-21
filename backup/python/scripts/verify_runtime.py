@@ -26,7 +26,7 @@ def main() -> None:
     root.update_idletasks()
     root.destroy()
     if not (settings.VLC_DIR / "libvlc.dll").is_file():
-        raise RuntimeError("Project VLC runtime is missing; run setup.cmd")
+        raise RuntimeError("Project VLC runtime is missing; run scripts/setup.ps1")
     backend = VlcBackend(settings.VLC_DIR)
     backend.close()
 
